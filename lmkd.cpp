@@ -906,22 +906,6 @@ static void stats_write_lmk_kill_occurred_pid(int pid, struct kill_stat *kill_st
     }
 }
 
-/*
- * Write the state_changed over the data socket to be propagated via AMS to statsd
- */
-static void stats_write_lmk_state_changed(enum lmk_state state) {
-    LMKD_CTRL_PACKET packet_state_changed;
-    const size_t len = lmkd_pack_set_state_changed(packet_state_changed, state);
-    if (len == 0) {
-        return;
-    }
-    for (int i = 0; i < MAX_DATA_CONN; i++) {
-        if (data_sock[i].sock >= 0 && data_sock[i].async_event_mask & 1 << LMK_ASYNC_EVENT_STAT) {
-            ctrl_data_write(i, (char*)packet_state_changed, len);
-        }
-    }
-}
-
 static void poll_kernel(int poll_fd) {
     if (poll_fd == -1) {
         // not waiting
@@ -3020,7 +3004,6 @@ static int find_and_kill_process(int min_score_adj, struct kill_info *ki, union 
                                  struct psi_data *pd) {
     int i;
     int killed_size = 0;
-    bool lmk_state_change_start = false;
     bool choose_heaviest_task = kill_heaviest_task;
 
     for (i = OOM_SCORE_ADJ_MAX; i >= min_score_adj; i--) {
@@ -3043,10 +3026,6 @@ static int find_and_kill_process(int min_score_adj, struct kill_info *ki, union 
 
             killed_size = kill_one_process(procp, min_score_adj, ki, mi, wi, tm, pd);
             if (killed_size >= 0) {
-                if (!lmk_state_change_start) {
-                    lmk_state_change_start = true;
-                    stats_write_lmk_state_changed(STATE_START);
-                }
                 break;
             }
         }
@@ -3057,10 +3036,6 @@ static int find_and_kill_process(int min_score_adj, struct kill_info *ki, union 
 
     if (!killed_size && !min_score_adj && is_userdebug_or_eng_build) {
         killed_size = proc_get_script();
-    }
-
-    if (lmk_state_change_start) {
-        stats_write_lmk_state_changed(STATE_STOP);
     }
 
     return killed_size;
