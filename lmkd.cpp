@@ -216,6 +216,7 @@ static int mpevfd[VMPRESS_LEVEL_COUNT] = { -1, -1, -1, -1 };
 static bool pidfd_supported;
 static int last_kill_pid_or_fd = -1;
 static struct timespec last_kill_tm;
+static bool psi_monitors_registration_skipped = false;
 
 /* lmkd configurable parameters */
 static bool is_userdebug_or_eng_build = false;
@@ -254,6 +255,7 @@ static int psi_cont_event_thresh = PSI_CONT_EVENT_THRESH;
 /* PSI window related variables */
 static int psi_window_size_ms = PSI_WINDOW_SIZE_MS;
 static int psi_poll_period_scrit_ms = PSI_POLL_PERIOD_SHORT_MS;
+static bool delay_psi_monitors_until_boot = false;
 static struct psi_threshold psi_thresholds[VMPRESS_LEVEL_COUNT] = {
     { PSI_SOME, PSI_OLD_LOW_THRESH_MS },    /* Default 70ms out of 1sec for partial stall */
     { PSI_SOME, PSI_OLD_MED_THRESH_MS },   /* Default 100ms out of 1sec for partial stall */
@@ -647,6 +649,9 @@ static long page_k = PAGE_SIZE / 1024;
 static void update_props();
 static bool init_monitors();
 static void destroy_monitors();
+static int register_psi_monitor(int epollfd, int fd, enum vmpressure_level level,
+                                bool use_new_strategy);
+static int start_psi_monitoring();
 
 static int clamp(int low, int high, int value) {
     return std::max(std::min(value, high), low);
@@ -1709,6 +1714,13 @@ static void ctrl_command_handler(int dsock_idx) {
             exit(1);
         }
         break;
+    case LMK_START_PSI_MONITORING:
+        if (start_psi_monitoring() < 0) {
+            /* Failure to start psi monitoring, crash to be restarted */
+            ALOGE("Failure to restart for psi monitoring. Exiting...");
+            exit(1);
+        }
+        break;
     default:
         ALOGE("Received unknown command code %d", cmd);
         return;
@@ -1718,6 +1730,36 @@ static void ctrl_command_handler(int dsock_idx) {
 
 wronglen:
     ALOGE("Wrong control socket read length cmd=%d len=%d", cmd, len);
+}
+
+static int start_psi_monitoring() {
+    // Psi monitoring needs to be started only if delay_psi_monitors_until_boot
+    // config is enabled.
+    if (!delay_psi_monitors_until_boot) {
+    return 0;
+    }
+
+    // Registration is needed only if it was skipped earlier.
+    if (!psi_monitors_registration_skipped) {
+    return 0;
+    }
+
+    bool use_new_strategy =
+            GET_LMK_PROPERTY(bool, "use_new_strategy", low_ram_device || !use_minfree_levels);
+
+    for (int level = VMPRESS_LEVEL_LOW; level <= VMPRESS_LEVEL_CRITICAL; level++) {
+    if (mpevfd[level] < 0) {
+        continue;
+    }
+    if (register_psi_monitor(epollfd, mpevfd[level], (enum vmpressure_level)level,
+                             use_new_strategy) < 0) {
+        return -1;
+    }
+    }
+
+    ALOGI("Started psi monitoring after boot completed.");
+    psi_monitors_registration_skipped = false;
+    return 1;
 }
 
 static void ctrl_data_handler(int data, uint32_t events,
@@ -4108,16 +4150,34 @@ static bool init_mp_psi(enum vmpressure_level level, bool use_new_strategy) {
         return false;
     }
 
-    vmpressure_hinfo[level].handler = use_new_strategy ? mp_event_psi : mp_event_common;
-    vmpressure_hinfo[level].data = level;
-    if (register_psi_monitor(epollfd, fd, &vmpressure_hinfo[level]) < 0) {
-        destroy_psi_monitor(fd);
+    if (register_psi_monitor(epollfd, fd, level, use_new_strategy) < 0) {
         return false;
     }
+
     maxevents++;
     mpevfd[level] = fd;
 
     return true;
+}
+
+static int register_psi_monitor(int epollfd, int fd, enum vmpressure_level level,
+                                bool use_new_strategy) {
+    // Do not register psi monitors until boot completed for devices configured
+    // for delaying psi monitors. This is done to save CPU cycles for low
+    // resource devices during boot up.
+    if (!property_get_bool("sys.boot_completed", false) && delay_psi_monitors_until_boot) {
+        psi_monitors_registration_skipped = true;
+        return 0;
+    }
+
+    vmpressure_hinfo[level].handler = use_new_strategy ? mp_event_psi : mp_event_common;
+    vmpressure_hinfo[level].data = level;
+
+    if (register_psi_monitor(epollfd, fd, &vmpressure_hinfo[level]) < 0) {
+        destroy_psi_monitor(fd);
+        return -1;
+    }
+    return 1;
 }
 
 static void destroy_mp_psi(enum vmpressure_level level) {
@@ -4872,6 +4932,7 @@ static void update_props() {
     swap_util_max = clamp(0, 100, GET_LMK_PROPERTY(int32, "swap_util_max", 100));
     filecache_min_kb = GET_LMK_PROPERTY(int64, "filecache_min_kb", 0);
     stall_limit_critical = GET_LMK_PROPERTY(int64, "stall_limit_critical", 100);
+    delay_psi_monitors_until_boot = GET_LMK_PROPERTY(bool, "delay_psi_monitors_until_boot", false);
 
     reaper.enable_debug(debug_process_killing);
 
