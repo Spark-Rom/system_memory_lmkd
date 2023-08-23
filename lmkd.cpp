@@ -524,6 +524,7 @@ enum vmstat_field {
     VS_PGSKIP_MOVABLE,
     VS_PGSKIP_LAST_ZONE = VS_PGSKIP_MOVABLE,
     VS_COMPACT_STALL,
+    VS_PGREFILL,
     VS_FIELD_COUNT
 };
 
@@ -544,6 +545,7 @@ static const char* const vmstat_field_names[VS_FIELD_COUNT] = {
     "pgskip_high",
     "pgskip_movable",
     "compact_stall",
+    "pgrefill",
 };
 
 union vmstat {
@@ -562,6 +564,7 @@ union vmstat {
         int64_t pgskip_high;
         int64_t pgskip_movable;
         int64_t compact_stall;
+        int64_t pgrefill;
     } field;
     int64_t arr[VS_FIELD_COUNT];
 };
@@ -3388,6 +3391,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
     static int64_t init_pgscan_direct;
     static int64_t init_direct_throttle;
     static int64_t init_pgskip[VS_PGSKIP_LAST_ZONE - VS_PGSKIP_FIRST_ZONE + 1];
+    static int64_t init_pgrefill;
     static bool killing;
     static int thrashing_limit = thrashing_limit_pct;
     static struct wakeup_info wi;
@@ -3510,6 +3514,7 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         for (i = VS_PGSKIP_FIRST_ZONE; i <= VS_PGSKIP_LAST_ZONE; i++) {
             init_pgskip[PGSKIP_IDX(i)] = vs.arr[i];
         }
+        init_pgrefill = vs.field.pgrefill;
         reclaim = DIRECT_RECLAIM;
     }  else if (vs.field.pgscan_direct_throttle > init_direct_throttle) {
         init_direct_throttle = vs.field.pgscan_direct_throttle;
@@ -3519,6 +3524,10 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
         for (i = VS_PGSKIP_FIRST_ZONE; i <= VS_PGSKIP_LAST_ZONE; i++) {
             init_pgskip[PGSKIP_IDX(i)] = vs.arr[i];
         }
+        init_pgrefill = vs.field.pgrefill;
+        reclaim = KSWAPD_RECLAIM;
+    } else if (vs.field.pgrefill != init_pgrefill) {
+        init_pgrefill = vs.field.pgrefill;
         reclaim = KSWAPD_RECLAIM;
     } else if (workingset_refault_file == prev_workingset_refault) {
 
